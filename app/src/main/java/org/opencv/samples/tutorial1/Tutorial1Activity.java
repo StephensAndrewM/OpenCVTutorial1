@@ -4,9 +4,11 @@ import org.opencv.android.BaseLoaderCallback;
 import org.opencv.android.CameraBridgeViewBase.CvCameraViewFrame;
 import org.opencv.android.LoaderCallbackInterface;
 import org.opencv.android.OpenCVLoader;
+import org.opencv.core.DMatch;
 import org.opencv.core.Mat;
 import org.opencv.android.CameraBridgeViewBase;
 import org.opencv.android.CameraBridgeViewBase.CvCameraViewListener2;
+import org.opencv.core.MatOfDMatch;
 import org.opencv.core.MatOfKeyPoint;
 import org.opencv.core.Scalar;
 import org.opencv.core.Size;
@@ -37,6 +39,10 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.util.LinkedList;
+import java.util.List;
+
+import static org.opencv.features2d.Features2d.drawMatches;
 
 public class Tutorial1Activity extends Activity implements CvCameraViewListener2, OnTouchListener {
     private static final String TAG = "OCVSample::Activity";
@@ -91,13 +97,16 @@ public class Tutorial1Activity extends Activity implements CvCameraViewListener2
 
         // Update State Based on Intent Settings
         Bundle extras = getIntent().getExtras();
-        if (extras != null) {
+        if (extras != null && extras.getString("photoActivityState") != null) {
             Log.i(TAG, extras.getString("photoActivityState"));
         } else {
             Log.i(TAG, "no extras");
         }
 
-        if (extras != null && extras.getString("photoActivityState").equals("PUZZLE_BOX")) {
+        // First check that the intent data exists. Then check that the string we want isn't
+        // null. Finally, check that the string has the desired value.
+        if (extras != null && extras.getString("photoActivityState") != null
+                && extras.getString("photoActivityState").equals("PUZZLE_BOX")) {
             state = PhotoActivityState.PUZZLE_BOX;
         } else {
             state = PhotoActivityState.PUZZLE_PIECES;
@@ -171,12 +180,16 @@ public class Tutorial1Activity extends Activity implements CvCameraViewListener2
             Log.i("Tutorial1Activity", "Touched");
 
             // Convert Image to Grayscale
-            Mat mGray = new Mat();
-            Imgproc.cvtColor(rgba, mGray, Imgproc.COLOR_RGB2GRAY);
+//            Mat mGray = new Mat();
+//            Imgproc.cvtColor(rgba, mGray, Imgproc.COLOR_RGB2GRAY);
 
+            // Initialize Feature Point Detector and Extractor
             FeatureDetector detector = FeatureDetector.create(FeatureDetector.ORB);
             DescriptorExtractor extractor = DescriptorExtractor.create(DescriptorExtractor.ORB);
+            DescriptorMatcher matcher = DescriptorMatcher.create(DescriptorMatcher.BRUTEFORCE_HAMMING);
 
+            // Set Parameters for Extractor
+            // TODO Make This Work
             String filename = "opencv.yml";
             File outputFile = new File(this.getCacheDir(), filename);
             try {
@@ -190,11 +203,9 @@ public class Tutorial1Activity extends Activity implements CvCameraViewListener2
             }
             extractor.read(outputFile.getAbsolutePath());
 
-            Mat descriptors = new Mat();
-            MatOfKeyPoint keypoints = new MatOfKeyPoint();
+//            Mat descriptors = new Mat();
 
-            detector.detect(rgba, keypoints);
-
+            // Get Image Pixels, Convert to mBGR Format
             Mat mBgr = new Mat();
             Imgproc.cvtColor(rgba, mBgr, Imgproc.COLOR_RGBA2BGR, 3);
             saveImage(mBgr);
@@ -225,12 +236,80 @@ public class Tutorial1Activity extends Activity implements CvCameraViewListener2
 //            intent.putExtra("imageToDisplay2", imageFilePath2);
 
             if (state == PhotoActivityState.PUZZLE_PIECES) {
+                // Save Current Photo URL
+
                 intent = new Intent(getBaseContext(), Tutorial1Activity.class);
                 intent.putExtra("photoActivityState", "PUZZLE_BOX");
+                intent.putExtra("origSaveTime", origSaveTime);
+
             } else {
-                intent = new Intent(getBaseContext(), PointDisplayActivity.class);
+                // Get Old Photo, Read Back to mBGR, Compare Feature Points
+
+                // Get Name of Pieces Photo
+                Bundle extras = getIntent().getExtras();
+                long origSaveTime = extras.getLong("origSaveTime");
+                String pieceFilename = origSaveTime + ".png";
+                Log.i(TAG, pieceFilename);
+
+                // Open Pieces Photo
+                File sd = Environment.getExternalStorageDirectory();
+                File pieceDirectory = new File(sd, "jig/pieces/");
+                File pFile = new File(pieceDirectory, pieceFilename);
+                Mat piecesMat = Imgcodecs.imread(pFile.getAbsolutePath(), Imgcodecs.IMREAD_GRAYSCALE);
+                Log.i(TAG, pFile.getAbsolutePath());
+
+                // Open Box Photo
+                File boxDirectory = new File(sd, "jig/box/");
+                File bFile = new File(boxDirectory, pieceFilename);
+                Mat boxMat = Imgcodecs.imread(bFile.getAbsolutePath(), Imgcodecs.IMREAD_GRAYSCALE);
+                Log.i(TAG, bFile.getAbsolutePath());
+
+                if (piecesMat.width() == 0) { Log.i("onCameraFrame", "Could Not Open PiecesMat"); }
+                if (boxMat.width() == 0) { Log.i("onCameraFrame", "Could Not Open BoxMat"); }
+
+                // Perform Feature Point Detection
+                MatOfKeyPoint boxKeypoints = new MatOfKeyPoint();
+                detector.detect(boxMat, boxKeypoints);
+                Mat boxDescriptors = new Mat();
+                extractor.compute(boxMat, boxKeypoints, boxDescriptors);
+
+                MatOfKeyPoint pieceKeypoints = new MatOfKeyPoint();
+                detector.detect(piecesMat, pieceKeypoints);
+                Mat pieceDescriptors = new Mat();
+                extractor.compute(piecesMat, pieceKeypoints, pieceDescriptors);
+
+                // Get Matches
+                MatOfDMatch matches = new MatOfDMatch();
+                matcher.match(boxDescriptors, pieceDescriptors, matches);
+
+                // Check Each Match, Make Sure It's Within Reasonable Hamming Distance
+                double max_dist = 0;
+                double min_dist = 100;
+                List<DMatch> matchesList = matches.toList();
+                for (int i = 0; i < pieceDescriptors.rows(); i++) {
+                    Double distance = (double) matchesList.get(i).distance;
+                    if (distance < min_dist) min_dist = distance;
+                    if (distance > max_dist) max_dist = distance;
+                }
+
+                LinkedList<DMatch> listOfGoodMatches = new LinkedList<>();
+                for (int i = 0; i < pieceDescriptors.rows(); i++) {
+                    if (matchesList.get(i).distance < 3 * min_dist) {
+                        listOfGoodMatches.add(matchesList.get(i));
+                    }
+                }
+                MatOfDMatch goodMatches = new MatOfDMatch();
+                goodMatches.fromList(listOfGoodMatches);
+
+                // Show Matches, Save Resultant Image
+                Mat matchesMat = new Mat();
+                drawMatches(boxMat, boxKeypoints, piecesMat, pieceKeypoints, goodMatches, matchesMat);
+                saveImage(matchesMat);
+
+                // Go Back to Home Screen
+                intent = new Intent(getBaseContext(), Tutorial1Activity.class);
+//                intent = new Intent(getBaseContext(), PointDisplayActivity.class);
             }
-            intent.putExtra("origSaveTime", origSaveTime);
 
             startActivity(intent);
 
@@ -266,7 +345,7 @@ public class Tutorial1Activity extends Activity implements CvCameraViewListener2
             file = new File(boxDirectory, filename);
         }
 
-        filename = file.toString();
+        filename = file.getAbsolutePath();
         Log.i(TAG, filename);
         Boolean imageSaved = Imgcodecs.imwrite(filename, mBgr);
 
